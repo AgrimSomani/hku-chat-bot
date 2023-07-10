@@ -1,52 +1,69 @@
-from langchain.document_loaders import DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import SentenceTransformerEmbeddings
-import pinecone
-from langchain.vectorstores import Pinecone
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import ConversationChain
+from langchain.chains.conversation.memory import ConversationBufferWindowMemory
+from langchain.prompts import (
+    SystemMessagePromptTemplate,
+    HumanMessagePromptTemplate,
+    ChatPromptTemplate,
+    MessagesPlaceholder
+)
+import streamlit as st
+from streamlit_chat import message
+from add_to_db import *
+from utils import find_match, get_conversation_string, query_refiner
 import os
-from dotenv import load_dotenv
 
 load_dotenv()
 
-PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-directory = './data'
+st.title("HKU Chatbot")
 
-# function to load documents
-def load_docs(directory):
-    loader = DirectoryLoader(directory)
-    documents = loader.load()
-    return documents
+if 'responses' not in st.session_state:
+    st.session_state['responses'] = ["How can I assist you today?"]
 
-# fucntion to split document content into chunks
-def split_docs(documents,chunk_size=500,overlap=20):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size,chunk_overlap=overlap)
-    docs = text_splitter.split_documents(documents)
-    return docs
+if 'requests' not in st.session_state:
+    st.session_state['requests'] = []
+
+llm = ChatOpenAI(model_name='gpt-3.5-turbo',openai_api_key=OPENAI_API_KEY)
+
+if 'buffer_memory' not in st.session_state:
+    st.session_state.buffer_memory = ConversationBufferWindowMemory(k=2,return_messages=True)
+
+system_message_template = SystemMessagePromptTemplate.from_template(template="""Answer the question as truthfully as possible using the provided context, and if the answer cannot be comprehended, say 'Im not about this, please email HKU. DO NOT say "according to the provided context" or anything similar in your final answer though""")
+
+human_msg_template = HumanMessagePromptTemplate.from_template(template="{input}")
+
+prompt_template = ChatPromptTemplate.from_messages([system_message_template,MessagesPlaceholder(variable_name="history"),human_msg_template])
+
+conversation = ConversationChain(llm=llm,memory=st.session_state.buffer_memory,prompt=prompt_template, verbose=True)
 
 
-# documents = load_docs(directory)
-# docs = split_docs(documents)
+response_container = st.container()
+text_container = st.container()
 
-embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+with text_container:
+    query = st.text_input("Query: ", key="input")
+    if query:
+        with st.spinner("typing..."):
+            conversation_string = get_conversation_string()
 
-# initialize pinecone
-pinecone.init(
-    api_key=PINECONE_API_KEY,
-    environment="us-west4-gcp-free"
-)
+            refined_query = query_refiner(conversation_string,query)
 
-index_name = "hku-chatbot"
-index = Pinecone.from_existing_index(index_name=index_name,embedding=embeddings)
+            st.subheader("Refined Query: ")
+            st.write(refined_query)
+            context = find_match(refined_query)
 
-# function for getting similar docs from pinecone db using semantic search, based on input query
-def get_similar_docs(query,k=10,score=False):
-        similar_docs = index.similarity_search_with_score(query,k=k) if score else index.similarity_search(query,k=k)
+            response = conversation.predict(input=f"Context:\n {context} \n\n Query:\n {refined_query}")
+        st.session_state.requests.append(query)
+        st.session_state.responses.append(response)
 
-        return similar_docs
+with response_container:
+    if st.session_state['responses']:
 
-query = "Honours"
+        for i in range(len(st.session_state["responses"])):
+            message(st.session_state["responses"][i],key=str(i))
+            if i < len(st.session_state['requests']):
+                message(st.session_state["requests"][i],is_user=True,key=str(i)+'_user')
+    
 
-similar_docs = get_similar_docs(query,score=True)
-
-print(similar_docs)
